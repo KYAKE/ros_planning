@@ -1,0 +1,51 @@
+# ROS 2 / colcon generated output
+build/
+install/
+log/
+
+# Python bytecode and package metadata
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+
+# CMake and native build artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+*.o
+*.so
+*.a
+
+# ROS runtime artifacts
+*.bag
+*.bag.active
+rosbag2_*/
+.ros/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Environment and local config
+.env
+.env.*
+!.env.example
+*.local
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

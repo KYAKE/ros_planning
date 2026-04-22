@@ -1,0 +1,3 @@
+string from_point
+string to_point
+topology_msgs/RouteInfo route_info

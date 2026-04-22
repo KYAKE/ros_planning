@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<robot name="turtlebot3_waffle" xmlns:xacro="http://ros.org/wiki/xacro">
+  <xacro:include filename="common_properties.xacro" />
+  <xacro:include filename="turtlebot3_waffle.urdf.xacro" />
+</robot>
