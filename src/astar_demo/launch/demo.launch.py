@@ -7,6 +7,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -25,6 +26,15 @@ def generate_launch_description():
     map_arg = DeclareLaunchArgument("map", default_value=default_map)
     use_rviz_arg = DeclareLaunchArgument("use_rviz", default_value="false")
     rosbridge_port_arg = DeclareLaunchArgument("rosbridge_port", default_value="9090")
+    camera_topic_arg = DeclareLaunchArgument(
+        "camera_topic", default_value="/camera/rgb/image_raw"
+    )
+    camera_info_topic_arg = DeclareLaunchArgument(
+        "camera_info_topic", default_value="/camera/rgb/camera_info"
+    )
+    camera_width_arg = DeclareLaunchArgument("camera_width", default_value="320")
+    camera_height_arg = DeclareLaunchArgument("camera_height", default_value="240")
+    camera_publish_rate_arg = DeclareLaunchArgument("camera_publish_rate", default_value="5.0")
 
     robot_description = Command(["xacro ", xacro_file])
 
@@ -36,6 +46,13 @@ def generate_launch_description():
         parameters=[
             {
                 "map_yaml": LaunchConfiguration("map"),
+                "camera_topic": LaunchConfiguration("camera_topic"),
+                "camera_info_topic": LaunchConfiguration("camera_info_topic"),
+                "camera_width": ParameterValue(LaunchConfiguration("camera_width"), value_type=int),
+                "camera_height": ParameterValue(LaunchConfiguration("camera_height"), value_type=int),
+                "camera_publish_rate": ParameterValue(
+                    LaunchConfiguration("camera_publish_rate"), value_type=float
+                ),
             }
         ],
     )
@@ -74,6 +91,11 @@ def generate_launch_description():
             map_arg,
             use_rviz_arg,
             rosbridge_port_arg,
+            camera_topic_arg,
+            camera_info_topic_arg,
+            camera_width_arg,
+            camera_height_arg,
+            camera_publish_rate_arg,
             demo_node,
             robot_state_publisher,
             joint_state_publisher,

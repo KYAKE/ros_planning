@@ -8,6 +8,7 @@
 - TurtleBot3 Waffle URDF 模型
 - 纯 ROS2 Python A* 规划节点
 - 简化机器人运动仿真与路径跟踪
+- 模拟 RGB 摄像头画面：`/camera/rgb/image_raw`
 - `rosbridge websocket`，默认监听 `0.0.0.0:9090`
 - Flutter App 需要的核心 topic：`/map`、`/tf`、`/odom`、`/plan`、`/local_plan`、`/goal_pose`、`/cmd_vel`
 - 兼容 App 的 `topology_msgs`
@@ -61,6 +62,8 @@ hostname -I
 5. App 里建议选择 ROS2 / TurtleBot3 相关默认配置；本工程兼容以下关键 topic：
 
 - `map`
+- `/camera/rgb/image_raw`
+- `/camera/rgb/camera_info`
 - `/scan`
 - `/plan`
 - `/local_plan`
@@ -79,8 +82,25 @@ hostname -I
 - `/map/topology/update`
 - `/nav_to_topology_point`
 
+### Flutter 后端摄像头联调
+
+如果使用 `/home/jason/ROS_Flutter_Gui_App/backend` 作为 Flutter App 的后端，摄像头画面走后端的 HTTP/WebSocket 通道：
+
+1. 启动本工作区：`./start_demo.sh`
+2. 启动 Flutter GUI 后端，默认 HTTP 端口为 `8080`
+3. App 连接电脑局域网 IP，端口填写 `8080`
+4. 设置页保持图像话题为默认值：`/camera/rgb/image_raw`
+5. 主界面点击相机按钮，即可订阅并显示摄像头画面
+
+摄像头发布参数可在启动时覆盖：
+
+```bash
+./start_demo.sh camera_topic:=/camera/rgb/image_raw camera_width:=320 camera_height:=240 camera_publish_rate:=5.0
+```
+
 ## 已知说明
 
 - 这是轻量演示栈，不依赖 Gazebo，也没有把 ROS1 的 `move_base` / pluginlib 体系整体迁过去。
 - 手动控制支持 `vx/vy/vw`，其中 `vy` 以简化平面运动方式处理，主要目的是让 App 摇杆可直接联调。
 - 地图编辑页发布的 `/map/update` 和 `/map/topology/update` 已接入内存更新，但默认不自动落盘。
+- 当前摄像头是 ROS 端生成的模拟 RGB 图像，用于 App 话题订阅和显示链路联调；后续接入真实 USB/CSI 相机时，只要发布同名 `sensor_msgs/Image` 或 `sensor_msgs/CompressedImage` 即可复用 Flutter 显示链路。

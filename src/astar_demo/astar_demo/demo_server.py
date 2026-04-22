@@ -13,7 +13,7 @@ from geometry_msgs.msg import Quaternion, TransformStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import BatteryState, LaserScan
+from sensor_msgs.msg import BatteryState, CameraInfo, Image, LaserScan
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
 from topology_msgs.msg import MapProperty, NavPoint, RouteInfo, TopologyMap, TopologyRoute
@@ -168,6 +168,12 @@ class DemoServer(Node):
         self.declare_parameter("update_rate", 20.0)
         self.declare_parameter("map_publish_rate", 1.0)
         self.declare_parameter("scan_publish_rate", 5.0)
+        self.declare_parameter("camera_topic", "/camera/rgb/image_raw")
+        self.declare_parameter("camera_info_topic", "/camera/rgb/camera_info")
+        self.declare_parameter("camera_frame", "camera_rgb_optical_frame")
+        self.declare_parameter("camera_width", 320)
+        self.declare_parameter("camera_height", 240)
+        self.declare_parameter("camera_publish_rate", 5.0)
         self.declare_parameter("max_linear_speed", 0.45)
         self.declare_parameter("max_angular_speed", 1.3)
 
@@ -176,6 +182,11 @@ class DemoServer(Node):
         self.odom_frame = self.get_parameter("odom_frame").value
         self.base_frame = self.get_parameter("base_frame").value
         self.scan_frame = self.get_parameter("scan_frame").value
+        self.camera_topic = self.get_parameter("camera_topic").value
+        self.camera_info_topic = self.get_parameter("camera_info_topic").value
+        self.camera_frame = self.get_parameter("camera_frame").value
+        self.camera_width = max(64, int(self.get_parameter("camera_width").value))
+        self.camera_height = max(48, int(self.get_parameter("camera_height").value))
         self.max_linear_speed = float(self.get_parameter("max_linear_speed").value)
         self.max_angular_speed = float(self.get_parameter("max_angular_speed").value)
 
@@ -197,6 +208,11 @@ class DemoServer(Node):
             depth=5,
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
+        qos_camera = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
 
         self.map_pub = self.create_publisher(OccupancyGrid, "/map", qos_transient)
         self.global_costmap_pub = self.create_publisher(
@@ -211,6 +227,8 @@ class DemoServer(Node):
         self.odom_pub = self.create_publisher(Odometry, "/odom", 20)
         self.odom_alias_pub = self.create_publisher(Odometry, "/wheel/odometry", 20)
         self.scan_pub = self.create_publisher(LaserScan, "/scan", qos_sensor)
+        self.camera_pub = self.create_publisher(Image, self.camera_topic, qos_camera)
+        self.camera_info_pub = self.create_publisher(CameraInfo, self.camera_info_topic, 10)
         self.battery_pub = self.create_publisher(BatteryState, "/battery_status", 10)
         self.footprint_pub = self.create_publisher(
             PolygonStamped, "/local_costmap/published_footprint", 10
@@ -254,11 +272,14 @@ class DemoServer(Node):
         self.last_update_time = self.get_clock().now()
         self.last_map_publish_time = self.get_clock().now()
         self.last_scan_publish_time = self.get_clock().now()
+        self.last_camera_publish_time = self.get_clock().now()
         self.last_status_publish_time = self.get_clock().now()
 
         update_rate = float(self.get_parameter("update_rate").value)
         self.map_publish_period = 1.0 / float(self.get_parameter("map_publish_rate").value)
         self.scan_publish_period = 1.0 / float(self.get_parameter("scan_publish_rate").value)
+        camera_publish_rate = max(0.5, float(self.get_parameter("camera_publish_rate").value))
+        self.camera_publish_period = 1.0 / camera_publish_rate
         self.update_timer = self.create_timer(1.0 / update_rate, self._on_timer)
 
         self._publish_static_topics(force=True)
@@ -605,6 +626,10 @@ class DemoServer(Node):
             self.last_scan_publish_time = now
             self._publish_scan()
 
+        if force or (now - self.last_camera_publish_time).nanoseconds / 1e9 >= self.camera_publish_period:
+            self.last_camera_publish_time = now
+            self._publish_camera()
+
         if force or (now - self.last_status_publish_time).nanoseconds / 1e9 >= 1.0:
             self.last_status_publish_time = now
             self._publish_battery()
@@ -710,6 +735,159 @@ class DemoServer(Node):
         laser.ranges = ranges
         self.scan_pub.publish(laser)
 
+    def _publish_camera(self) -> None:
+        stamp = self.get_clock().now().to_msg()
+        image = Image()
+        image.header.stamp = stamp
+        image.header.frame_id = self.camera_frame
+        image.height = self.camera_height
+        image.width = self.camera_width
+        image.encoding = "rgb8"
+        image.is_bigendian = 0
+        image.step = self.camera_width * 3
+        image.data = self._render_camera_frame()
+        self.camera_pub.publish(image)
+
+        info = CameraInfo()
+        info.header = image.header
+        info.height = self.camera_height
+        info.width = self.camera_width
+        fx = float(self.camera_width) * 0.72
+        fy = float(self.camera_height) * 0.92
+        cx = float(self.camera_width) * 0.5
+        cy = float(self.camera_height) * 0.5
+        info.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
+        info.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+        info.d = []
+        info.distortion_model = "plumb_bob"
+        self.camera_info_pub.publish(info)
+
+    def _render_camera_frame(self) -> bytes:
+        width = self.camera_width
+        height = self.camera_height
+        horizon = int(height * 0.46)
+        buffer = bytearray(width * height * 3)
+
+        for y in range(height):
+            row = y * width * 3
+            if y < horizon:
+                shade = int(38 + 30 * y / max(1, horizon))
+                color = (shade, shade + 2, shade + 6)
+            else:
+                mix = (y - horizon) / max(1, height - horizon)
+                shade = int(72 + 36 * mix)
+                color = (shade - 8, shade, shade - 10)
+            buffer[row : row + width * 3] = bytes(color) * width
+
+        self._draw_camera_walls(buffer, width, height, horizon)
+        self._draw_camera_floor_grid(buffer, width, height, horizon)
+        self._draw_robot_overlay(buffer, width, height)
+        return bytes(buffer)
+
+    def _draw_camera_walls(self, buffer: bytearray, width: int, height: int, horizon: int) -> None:
+        fov = math.radians(70.0)
+        max_range = 6.0
+        for x in range(width):
+            rel = (x / max(1, width - 1)) - 0.5
+            ray_angle = self.pose_yaw + rel * fov
+            distance = self._ray_cast(self.pose_x, self.pose_y, ray_angle, max_range)
+            corrected = max(0.08, distance * math.cos(rel * fov))
+            wall_height = int(min(height * 0.92, height * 0.72 / corrected))
+            y0 = max(0, horizon - wall_height // 2)
+            y1 = min(height, horizon + wall_height // 2)
+
+            brightness = int(clamp(210 - corrected * 30.0, 52, 210))
+            side_tint = int(18 * abs(rel))
+            color = (
+                max(0, brightness - 12 - side_tint),
+                max(0, brightness - 4 - side_tint),
+                brightness,
+            )
+            for y in range(y0, y1):
+                idx = (y * width + x) * 3
+                buffer[idx] = color[0]
+                buffer[idx + 1] = color[1]
+                buffer[idx + 2] = color[2]
+
+    def _draw_camera_floor_grid(self, buffer: bytearray, width: int, height: int, horizon: int) -> None:
+        vanishing_x = width // 2
+        line_color = (128, 145, 130)
+        for offset in range(-4, 5):
+            bottom_x = width // 2 + offset * width // 7
+            self._draw_line(buffer, width, height, vanishing_x, horizon, bottom_x, height - 1, line_color)
+
+        y = horizon + 14
+        while y < height:
+            color = (118, 135, 122) if ((y - horizon) // 18) % 2 == 0 else (92, 112, 98)
+            self._draw_line(buffer, width, height, 0, y, width - 1, y, color)
+            y += max(12, int((y - horizon) * 0.26))
+
+    def _draw_robot_overlay(self, buffer: bytearray, width: int, height: int) -> None:
+        margin = 14
+        panel_w = min(210, width - 2 * margin)
+        panel_h = 54
+        self._draw_rect(buffer, width, height, margin, margin, panel_w, panel_h, (24, 32, 38))
+        bar_w = int((panel_w - 24) * 0.78)
+        self._draw_rect(buffer, width, height, margin + 12, margin + 34, bar_w, 8, (70, 190, 120))
+
+        yaw_marker = int((normalize_angle(self.pose_yaw) + math.pi) / (2.0 * math.pi) * (panel_w - 24))
+        self._draw_rect(buffer, width, height, margin + 12 + yaw_marker - 2, margin + 16, 4, 14, (250, 200, 80))
+
+    def _draw_rect(
+        self,
+        buffer: bytearray,
+        width: int,
+        height: int,
+        x: int,
+        y: int,
+        rect_w: int,
+        rect_h: int,
+        color: Tuple[int, int, int],
+    ) -> None:
+        x0 = max(0, x)
+        y0 = max(0, y)
+        x1 = min(width, x + rect_w)
+        y1 = min(height, y + rect_h)
+        for py in range(y0, y1):
+            row = py * width * 3
+            for px in range(x0, x1):
+                idx = row + px * 3
+                buffer[idx] = color[0]
+                buffer[idx + 1] = color[1]
+                buffer[idx + 2] = color[2]
+
+    def _draw_line(
+        self,
+        buffer: bytearray,
+        width: int,
+        height: int,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        color: Tuple[int, int, int],
+    ) -> None:
+        dx = abs(x1 - x0)
+        sx = 1 if x0 < x1 else -1
+        dy = -abs(y1 - y0)
+        sy = 1 if y0 < y1 else -1
+        err = dx + dy
+        while True:
+            if 0 <= x0 < width and 0 <= y0 < height:
+                idx = (y0 * width + x0) * 3
+                buffer[idx] = color[0]
+                buffer[idx + 1] = color[1]
+                buffer[idx + 2] = color[2]
+            if x0 == x1 and y0 == y1:
+                break
+            twice_err = 2 * err
+            if twice_err >= dy:
+                err += dy
+                x0 += sx
+            if twice_err <= dx:
+                err += dx
+                y0 += sy
+
     def _ray_cast(self, origin_x: float, origin_y: float, angle: float, max_range: float) -> float:
         step = max(self.grid_map.resolution * 0.5, 0.03)
         distance = laser_min = 0.05
@@ -761,7 +939,8 @@ def main(args=None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
