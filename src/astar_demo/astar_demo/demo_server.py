@@ -86,6 +86,46 @@ class GridMap:
         value = self.data[self.index(gx, gy)]
         return 0 <= value < 50
 
+    def inflated(self, radius_m: float) -> "GridMap":
+        radius_cells = max(0, int(math.ceil(radius_m / self.resolution)))
+        if radius_cells <= 0:
+            return GridMap(
+                resolution=self.resolution,
+                width=self.width,
+                height=self.height,
+                origin_x=self.origin_x,
+                origin_y=self.origin_y,
+                origin_theta=self.origin_theta,
+                data=list(self.data),
+            )
+
+        inflated_data = list(self.data)
+        radius_sq = radius_cells * radius_cells
+        occupied_cells = [
+            (idx % self.width, idx // self.width)
+            for idx, value in enumerate(self.data)
+            if value < 0 or value >= 50
+        ]
+        for ox, oy in occupied_cells:
+            for dy in range(-radius_cells, radius_cells + 1):
+                for dx in range(-radius_cells, radius_cells + 1):
+                    if dx * dx + dy * dy > radius_sq:
+                        continue
+                    nx = ox + dx
+                    ny = oy + dy
+                    if self.in_bounds(nx, ny):
+                        inflated_data[self.index(nx, ny)] = 100
+
+        return GridMap(
+            resolution=self.resolution,
+            width=self.width,
+            height=self.height,
+            origin_x=self.origin_x,
+            origin_y=self.origin_y,
+            origin_theta=self.origin_theta,
+            data=inflated_data,
+        )
+
     def world_to_grid(self, x: float, y: float) -> Optional[Tuple[int, int]]:
         gx = int((x - self.origin_x) / self.resolution)
         gy = int((y - self.origin_y) / self.resolution)
@@ -174,6 +214,10 @@ class DemoServer(Node):
         self.declare_parameter("camera_width", 320)
         self.declare_parameter("camera_height", 240)
         self.declare_parameter("camera_publish_rate", 5.0)
+        self.declare_parameter("robot_radius", 0.22)
+        self.declare_parameter("obstacle_inflation_radius", 0.35)
+        self.declare_parameter("obstacle_stop_distance", 0.16)
+        self.declare_parameter("obstacle_slow_distance", 0.75)
         self.declare_parameter("max_linear_speed", 0.45)
         self.declare_parameter("max_angular_speed", 1.3)
 
@@ -187,6 +231,16 @@ class DemoServer(Node):
         self.camera_frame = self.get_parameter("camera_frame").value
         self.camera_width = max(64, int(self.get_parameter("camera_width").value))
         self.camera_height = max(48, int(self.get_parameter("camera_height").value))
+        self.robot_radius = max(0.05, float(self.get_parameter("robot_radius").value))
+        self.obstacle_inflation_radius = max(
+            self.robot_radius,
+            float(self.get_parameter("obstacle_inflation_radius").value),
+        )
+        self.obstacle_stop_distance = max(0.0, float(self.get_parameter("obstacle_stop_distance").value))
+        self.obstacle_slow_distance = max(
+            self.obstacle_stop_distance + 0.05,
+            float(self.get_parameter("obstacle_slow_distance").value),
+        )
         self.max_linear_speed = float(self.get_parameter("max_linear_speed").value)
         self.max_angular_speed = float(self.get_parameter("max_angular_speed").value)
 
@@ -194,8 +248,9 @@ class DemoServer(Node):
             raise RuntimeError("Parameter 'map_yaml' is required.")
 
         self.grid_map = self._load_map(map_yaml)
+        self.collision_map = self.grid_map.inflated(self.obstacle_inflation_radius)
         self.map_msg = self.grid_map.to_message(self.map_frame)
-        self.global_costmap_msg = self.grid_map.to_message(self.map_frame)
+        self.global_costmap_msg = self.collision_map.to_message(self.map_frame)
 
         qos_transient = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -327,11 +382,11 @@ class DemoServer(Node):
         )
 
     def _pick_start_pose(self) -> Tuple[float, float]:
-        for gy in range(self.grid_map.height // 2, self.grid_map.height):
-            for gx in range(self.grid_map.width // 4, self.grid_map.width):
-                if self.grid_map.is_free(gx, gy):
-                    return self.grid_map.grid_to_world(gx, gy)
-        return self.grid_map.grid_to_world(self.grid_map.width // 2, self.grid_map.height // 2)
+        for gy in range(self.collision_map.height // 2, self.collision_map.height):
+            for gx in range(self.collision_map.width // 4, self.collision_map.width):
+                if self.collision_map.is_free(gx, gy):
+                    return self.collision_map.grid_to_world(gx, gy)
+        return self.collision_map.grid_to_world(self.collision_map.width // 2, self.collision_map.height // 2)
 
     def _publish_static_tf(self) -> None:
         transform = TransformStamped()
@@ -363,7 +418,7 @@ class DemoServer(Node):
         if cell is None:
             self.get_logger().warning("Ignored initial pose outside map.")
             return
-        nearest = self.grid_map.nearest_free(*cell)
+        nearest = self.collision_map.nearest_free(*cell)
         if nearest is None:
             self.get_logger().warning("Ignored initial pose in blocked area.")
             return
@@ -395,8 +450,9 @@ class DemoServer(Node):
             origin_theta=0.0,
             data=[int(value) for value in msg.data],
         )
+        self.collision_map = self.grid_map.inflated(self.obstacle_inflation_radius)
         self.map_msg = self.grid_map.to_message(self.map_frame)
-        self.global_costmap_msg = self.grid_map.to_message(self.map_frame)
+        self.global_costmap_msg = self.collision_map.to_message(self.map_frame)
         self._replan_if_needed()
         self._publish_static_topics(force=True)
 
@@ -425,8 +481,14 @@ class DemoServer(Node):
             self.global_plan = []
             return
 
-        plan[-1] = (goal_x, goal_y, goal_yaw)
-        self.goal_pose = (goal_x, goal_y, goal_yaw)
+        safe_goal_x, safe_goal_y, _ = plan[-1]
+        plan[-1] = (safe_goal_x, safe_goal_y, goal_yaw)
+        self.goal_pose = (safe_goal_x, safe_goal_y, goal_yaw)
+        if math.hypot(safe_goal_x - goal_x, safe_goal_y - goal_y) > self.collision_map.resolution:
+            self.get_logger().info(
+                "Adjusted goal to nearest collision-free pose: "
+                f"({safe_goal_x:.2f}, {safe_goal_y:.2f})."
+            )
         self.global_plan = plan
         self.mode = "auto"
         self.cmd_vx = 0.0
@@ -442,13 +504,13 @@ class DemoServer(Node):
     def _plan_path(
         self, start_world: Tuple[float, float], goal_world: Tuple[float, float]
     ) -> List[Tuple[float, float, float]]:
-        start_cell = self.grid_map.world_to_grid(*start_world)
-        goal_cell = self.grid_map.world_to_grid(*goal_world)
+        start_cell = self.collision_map.world_to_grid(*start_world)
+        goal_cell = self.collision_map.world_to_grid(*goal_world)
         if start_cell is None or goal_cell is None:
             return []
 
-        start_cell = self.grid_map.nearest_free(*start_cell)
-        goal_cell = self.grid_map.nearest_free(*goal_cell)
+        start_cell = self.collision_map.nearest_free(*start_cell)
+        goal_cell = self.collision_map.nearest_free(*goal_cell)
         if start_cell is None or goal_cell is None:
             return []
 
@@ -476,11 +538,11 @@ class DemoServer(Node):
             for dx, dy, step_cost in motions:
                 nx = current[0] + dx
                 ny = current[1] + dy
-                if not self.grid_map.is_free(nx, ny):
+                if not self.collision_map.is_free(nx, ny):
                     continue
 
                 if dx != 0 and dy != 0:
-                    if not self.grid_map.is_free(current[0] + dx, current[1]) or not self.grid_map.is_free(
+                    if not self.collision_map.is_free(current[0] + dx, current[1]) or not self.collision_map.is_free(
                         current[0], current[1] + dy
                     ):
                         continue
@@ -505,9 +567,9 @@ class DemoServer(Node):
 
         poses: List[Tuple[float, float, float]] = []
         for index, (gx, gy) in enumerate(cells):
-            wx, wy = self.grid_map.grid_to_world(gx, gy)
+            wx, wy = self.collision_map.grid_to_world(gx, gy)
             if index + 1 < len(cells):
-                nx, ny = self.grid_map.grid_to_world(*cells[index + 1])
+                nx, ny = self.collision_map.grid_to_world(*cells[index + 1])
                 yaw = math.atan2(ny - wy, nx - wx)
             elif poses:
                 yaw = poses[-1][2]
@@ -556,9 +618,8 @@ class DemoServer(Node):
         vx = clamp(vx, -self.max_linear_speed, self.max_linear_speed)
         vy = clamp(vy, -self.max_linear_speed, self.max_linear_speed)
         vw = clamp(vw, -self.max_angular_speed, self.max_angular_speed)
-        self.applied_vx = vx
-        self.applied_vy = vy
-        self.applied_w = vw
+        if self.mode != "auto":
+            vx, vy = self._apply_obstacle_speed_constraint(vx, vy)
 
         world_dx = math.cos(self.pose_yaw) * vx - math.sin(self.pose_yaw) * vy
         world_dy = math.sin(self.pose_yaw) * vx + math.cos(self.pose_yaw) * vy
@@ -566,17 +627,67 @@ class DemoServer(Node):
         next_y = self.pose_y + world_dy * dt
         next_yaw = normalize_angle(self.pose_yaw + vw * dt)
 
-        cell = self.grid_map.world_to_grid(next_x, next_y)
-        if cell is not None and self.grid_map.is_free(*cell):
+        if self._motion_is_safe(next_x, next_y):
             self.pose_x = next_x
             self.pose_y = next_y
-        elif self.mode == "manual":
-            self.get_logger().debug("Manual command blocked by obstacle.")
+            self.applied_vx = vx
+            self.applied_vy = vy
+        else:
+            self.applied_vx = 0.0
+            self.applied_vy = 0.0
+            if self.mode == "auto":
+                self._replan_if_needed()
+            elif self.mode == "manual":
+                self.get_logger().debug("Manual command blocked by inflated obstacle.")
 
         self.pose_yaw = next_yaw
+        self.applied_w = vw
         self.trace_points.append((self.pose_x, self.pose_y, self.pose_yaw))
         if len(self.trace_points) > 2000:
             self.trace_points = self.trace_points[-2000:]
+
+    def _apply_obstacle_speed_constraint(self, vx: float, vy: float) -> Tuple[float, float]:
+        speed = math.hypot(vx, vy)
+        if speed <= 1e-4:
+            return vx, vy
+
+        move_heading = self.pose_yaw + math.atan2(vy, vx)
+        clearance = self._ray_cast_on_map(
+            self.grid_map,
+            self.pose_x,
+            self.pose_y,
+            move_heading,
+            self.robot_radius + self.obstacle_slow_distance,
+        )
+        stop_clearance = self.robot_radius + self.obstacle_stop_distance
+        slow_clearance = self.robot_radius + self.obstacle_slow_distance
+        if clearance <= stop_clearance:
+            return 0.0, 0.0
+        if clearance < slow_clearance:
+            scale = (clearance - stop_clearance) / (slow_clearance - stop_clearance)
+            scale = clamp(scale, 0.0, 1.0)
+            return vx * scale, vy * scale
+        return vx, vy
+
+    def _motion_is_safe(self, next_x: float, next_y: float) -> bool:
+        return self._segment_is_safe(self.pose_x, self.pose_y, next_x, next_y)
+
+    def _segment_is_safe(self, start_x: float, start_y: float, end_x: float, end_y: float) -> bool:
+        start_cell = self.collision_map.world_to_grid(start_x, start_y)
+        if start_cell is None or not self.collision_map.is_free(*start_cell):
+            return False
+
+        distance = math.hypot(end_x - start_x, end_y - start_y)
+        step = max(self.collision_map.resolution * 0.5, 0.02)
+        samples = max(1, int(math.ceil(distance / step)))
+        for i in range(1, samples + 1):
+            ratio = i / samples
+            x = start_x + (end_x - start_x) * ratio
+            y = start_y + (end_y - start_y) * ratio
+            cell = self.collision_map.world_to_grid(x, y)
+            if cell is None or not self.collision_map.is_free(*cell):
+                return False
+        return True
 
     def _tracking_command(self) -> Tuple[float, float, float]:
         goal_x, goal_y, goal_yaw = self.goal_pose
@@ -599,7 +710,7 @@ class DemoServer(Node):
                 nearest_dist = dist
                 nearest_idx = index
 
-        lookahead_idx = min(len(self.global_plan) - 1, nearest_idx + 4)
+        lookahead_idx = self._select_tracking_target(nearest_idx)
         target_x, target_y, _ = self.global_plan[lookahead_idx]
         target_heading = math.atan2(target_y - self.pose_y, target_x - self.pose_x)
         heading_error = normalize_angle(target_heading - self.pose_yaw)
@@ -611,6 +722,38 @@ class DemoServer(Node):
             linear *= 0.5
         angular = clamp(2.4 * heading_error, -self.max_angular_speed, self.max_angular_speed)
         return linear, 0.0, angular
+
+    def _select_tracking_target(self, nearest_idx: int) -> int:
+        if len(self.global_plan) <= 1:
+            return 0
+
+        lookahead_distance = 0.55
+        anchor_idx: Optional[int] = None
+        for index in range(nearest_idx, -1, -1):
+            target_x, target_y, _ = self.global_plan[index]
+            if self._segment_is_safe(self.pose_x, self.pose_y, target_x, target_y):
+                anchor_idx = index
+                break
+
+        if anchor_idx is None:
+            for index in range(nearest_idx + 1, len(self.global_plan)):
+                target_x, target_y, _ = self.global_plan[index]
+                if self._segment_is_safe(self.pose_x, self.pose_y, target_x, target_y):
+                    return index
+            return nearest_idx
+
+        best_idx = anchor_idx
+        for index in range(anchor_idx + 1, len(self.global_plan)):
+            target_x, target_y, _ = self.global_plan[index]
+            target_dist = math.hypot(target_x - self.pose_x, target_y - self.pose_y)
+            if target_dist > lookahead_distance and best_idx != anchor_idx:
+                break
+            if self._segment_is_safe(self.pose_x, self.pose_y, target_x, target_y):
+                best_idx = index
+                if target_dist >= lookahead_distance:
+                    break
+
+        return best_idx
 
     def _publish_runtime_topics(self, force: bool) -> None:
         now = self.get_clock().now()
@@ -642,7 +785,7 @@ class DemoServer(Node):
         self.map_pub.publish(self.map_msg)
         self.global_costmap_pub.publish(self.global_costmap_msg)
 
-        local_costmap = self.grid_map.local_window(self.pose_x, self.pose_y, 4.0).to_message(self.map_frame)
+        local_costmap = self.collision_map.local_window(self.pose_x, self.pose_y, 4.0).to_message(self.map_frame)
         local_costmap.header.stamp = stamp
         self.local_costmap_pub.publish(local_costmap)
 
@@ -889,15 +1032,25 @@ class DemoServer(Node):
                 y0 += sy
 
     def _ray_cast(self, origin_x: float, origin_y: float, angle: float, max_range: float) -> float:
-        step = max(self.grid_map.resolution * 0.5, 0.03)
+        return self._ray_cast_on_map(self.grid_map, origin_x, origin_y, angle, max_range)
+
+    def _ray_cast_on_map(
+        self,
+        grid_map: GridMap,
+        origin_x: float,
+        origin_y: float,
+        angle: float,
+        max_range: float,
+    ) -> float:
+        step = max(grid_map.resolution * 0.5, 0.03)
         distance = laser_min = 0.05
         while distance <= max_range:
             x = origin_x + math.cos(angle) * distance
             y = origin_y + math.sin(angle) * distance
-            cell = self.grid_map.world_to_grid(x, y)
+            cell = grid_map.world_to_grid(x, y)
             if cell is None:
                 return distance
-            if not self.grid_map.is_free(*cell):
+            if not grid_map.is_free(*cell):
                 return max(laser_min, distance)
             distance += step
         return max_range

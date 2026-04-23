@@ -35,6 +35,12 @@ def generate_launch_description():
     camera_width_arg = DeclareLaunchArgument("camera_width", default_value="320")
     camera_height_arg = DeclareLaunchArgument("camera_height", default_value="240")
     camera_publish_rate_arg = DeclareLaunchArgument("camera_publish_rate", default_value="5.0")
+    robot_radius_arg = DeclareLaunchArgument("robot_radius", default_value="0.22")
+    obstacle_inflation_radius_arg = DeclareLaunchArgument(
+        "obstacle_inflation_radius", default_value="0.35"
+    )
+    obstacle_stop_distance_arg = DeclareLaunchArgument("obstacle_stop_distance", default_value="0.16")
+    obstacle_slow_distance_arg = DeclareLaunchArgument("obstacle_slow_distance", default_value="0.75")
 
     robot_description = Command(["xacro ", xacro_file])
 
@@ -52,6 +58,16 @@ def generate_launch_description():
                 "camera_height": ParameterValue(LaunchConfiguration("camera_height"), value_type=int),
                 "camera_publish_rate": ParameterValue(
                     LaunchConfiguration("camera_publish_rate"), value_type=float
+                ),
+                "robot_radius": ParameterValue(LaunchConfiguration("robot_radius"), value_type=float),
+                "obstacle_inflation_radius": ParameterValue(
+                    LaunchConfiguration("obstacle_inflation_radius"), value_type=float
+                ),
+                "obstacle_stop_distance": ParameterValue(
+                    LaunchConfiguration("obstacle_stop_distance"), value_type=float
+                ),
+                "obstacle_slow_distance": ParameterValue(
+                    LaunchConfiguration("obstacle_slow_distance"), value_type=float
                 ),
             }
         ],
@@ -96,6 +112,10 @@ def generate_launch_description():
             camera_width_arg,
             camera_height_arg,
             camera_publish_rate_arg,
+            robot_radius_arg,
+            obstacle_inflation_radius_arg,
+            obstacle_stop_distance_arg,
+            obstacle_slow_distance_arg,
             demo_node,
             robot_state_publisher,
             joint_state_publisher,

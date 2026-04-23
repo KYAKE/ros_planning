@@ -19,4 +19,17 @@ set -u
 echo "[astar_demo] ROS bridge 将监听 0.0.0.0:9090"
 echo "[astar_demo] 手机端请连接主机局域网 IP 和端口 9090"
 
-exec ros2 launch astar_demo demo.launch.py "$@"
+LAUNCH_ARGS=("$@")
+has_rviz_arg=false
+for arg in "${LAUNCH_ARGS[@]}"; do
+  if [[ "${arg}" == use_rviz:=* ]]; then
+    has_rviz_arg=true
+    break
+  fi
+done
+
+if [ "${has_rviz_arg}" = false ]; then
+  LAUNCH_ARGS+=(use_rviz:=true)
+fi
+
+exec ros2 launch astar_demo demo.launch.py "${LAUNCH_ARGS[@]}"
